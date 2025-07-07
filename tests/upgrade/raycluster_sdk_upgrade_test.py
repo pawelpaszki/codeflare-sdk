@@ -114,6 +114,8 @@ class TestMnistJobSubmit:
     def assert_jobsubmit_withlogin(self, cluster):
         auth_token = run_oc_command(["whoami", "--show-token=true"])
         ray_dashboard = cluster.cluster_dashboard_uri()
+        print(cluster)
+        print(ray_dashboard)
         header = {"Authorization": f"Bearer {auth_token}"}
         client = RayJobClient(address=ray_dashboard, headers=header, verify=False)
 
@@ -146,7 +148,7 @@ class TestMnistJobSubmit:
 
         self.assert_job_completion(status)
 
-        client.delete_job(submission_id)
+        # client.delete_job(submission_id)
 
     def assert_job_completion(self, status):
         if status == "SUCCEEDED":
