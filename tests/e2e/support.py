@@ -2,6 +2,7 @@ import os
 import random
 import string
 import subprocess
+import warnings
 from codeflare_sdk import get_cluster
 from kubernetes import client, config
 from codeflare_sdk.common.kubernetes_cluster.kube_api_helpers import (
@@ -116,6 +117,12 @@ def create_namespace_with_name(self, namespace_name):
             metadata=client.V1ObjectMeta(name=self.namespace)
         )
         self.api_instance.create_namespace(namespace_body)
+    except client.ApiException as e:
+        if e.status == 409:  # Conflict - namespace already exists
+            warnings.warn(f"Namespace '{namespace_name}' already exists.", UserWarning)
+            return None  # Return None to indicate successful handling with warning
+        else:
+            return _kube_api_error_handling(e)
     except Exception as e:
         return _kube_api_error_handling(e)
 
