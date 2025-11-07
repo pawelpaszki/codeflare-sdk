@@ -387,6 +387,8 @@ class Cluster:
 
         This method attempts to send a GET request to the cluster dashboard URI.
         If the request is successful (HTTP status code 200), it returns True.
+        For OAuth-protected dashboards, a 302 redirect to the OAuth login page
+        also indicates the dashboard is ready (the OAuth proxy is working).
         If an SSL error occurs, it returns False, indicating the dashboard is not ready.
 
         Returns:
@@ -399,11 +401,14 @@ class Cluster:
             return False
 
         try:
+            # Don't follow redirects - we want to see the redirect response
+            # A 302 redirect from OAuth proxy indicates the dashboard is ready
             response = requests.get(
                 dashboard_uri,
                 headers=self._client_headers,
                 timeout=5,
                 verify=self._client_verify_tls,
+                allow_redirects=False,
             )
         except requests.exceptions.SSLError:  # pragma no cover
             # SSL exception occurs when oauth ingress has been created but cluster is not up
@@ -412,7 +417,11 @@ class Cluster:
             # Any other exception (connection errors, timeouts, etc.)
             return False
 
-        if response.status_code == 200:
+        # Dashboard is ready if:
+        # - 200: Dashboard is accessible (no auth required or already authenticated)
+        # - 302: OAuth redirect - dashboard and OAuth proxy are ready, just needs authentication
+        # - 401/403: OAuth is working and blocking unauthenticated requests - dashboard is ready
+        if response.status_code in (200, 302, 401, 403):
             return True
         else:
             return False
@@ -1148,6 +1157,99 @@ def _is_openshift_cluster():
         return _kube_api_error_handling(e)
 
 
+def _get_platform_namespace() -> str:
+    """
+    Returns the namespace where HTTPRoutes are created.
+
+    Detection strategy (in order):
+    1. APPLICATION_NAMESPACE env var (if set) - most reliable, no API calls
+    2. List HTTPRoutes across all namespaces with ray.io/cluster-name label
+    3. Search common namespaces for HTTPRoutes with label
+    4. Fallback: try to verify which namespace exists and is accessible
+
+    This works with minimal permissions since users need HTTPRoute read access
+    to access dashboards anyway. Guaranteed to return a namespace as long as
+    KubeRay is installed and user has basic HTTPRoute read permissions.
+
+    Returns:
+        Platform namespace string
+    """
+    # Step 1: Check APPLICATION_NAMESPACE env var (most reliable, no API calls)
+    if app_ns := os.getenv("APPLICATION_NAMESPACE"):
+        return app_ns
+
+    # Step 2: Try to list HTTPRoutes across all namespaces
+    # This works if user has cluster-wide permissions
+    try:
+        config_check()
+        api_instance = client.CustomObjectsApi(get_api_client())
+        httproutes = api_instance.list_cluster_custom_object(
+            group="gateway.networking.k8s.io",
+            version="v1",
+            plural="httproutes",
+            label_selector="ray.io/cluster-name",
+        )
+        items = httproutes.get("items", [])
+        if items:
+            # Return the namespace of the first HTTPRoute found
+            return items[0]["metadata"]["namespace"]
+    except Exception:  # pragma: no cover
+        pass
+
+    # Step 3: Search common namespaces for HTTPRoutes
+    # This works with namespace-scoped permissions
+    try:
+        config_check()
+        api_instance = client.CustomObjectsApi(get_api_client())
+        search_namespaces = [
+            "redhat-ods-applications",
+            "opendatahub",
+            "default",
+            "ray-system",
+        ]
+
+        for namespace in search_namespaces:
+            try:
+                httproutes = api_instance.list_namespaced_custom_object(
+                    group="gateway.networking.k8s.io",
+                    version="v1",
+                    namespace=namespace,
+                    plural="httproutes",
+                    label_selector="ray.io/cluster-name",
+                )
+                if httproutes.get("items"):
+                    return namespace
+            except client.exceptions.ApiException:
+                continue
+    except Exception:  # pragma: no cover
+        pass
+
+    # Step 4: Fallback - verify which namespace exists and is accessible
+    # Try to list HTTPRoutes (even without label) to verify namespace access
+    if _is_openshift_cluster():
+        try:
+            config_check()
+            api_instance = client.CustomObjectsApi(get_api_client())
+            for namespace in ["redhat-ods-applications", "opendatahub"]:
+                try:
+                    # If we can list HTTPRoutes (even empty), namespace exists and is accessible
+                    api_instance.list_namespaced_custom_object(
+                        group="gateway.networking.k8s.io",
+                        version="v1",
+                        namespace=namespace,
+                        plural="httproutes",
+                    )
+                    return namespace
+                except client.exceptions.ApiException:
+                    continue
+        except Exception:  # pragma: no cover
+            pass
+        # Final fallback for OpenShift
+        return "redhat-ods-applications"
+
+    return "ray-system"
+
+
 # Get dashboard URL from HTTPRoute (RHOAI v3.0+)
 def _get_dashboard_url_from_httproute(
     cluster_name: str, namespace: str
@@ -1155,6 +1257,10 @@ def _get_dashboard_url_from_httproute(
     """
     Attempts to get the Ray dashboard URL from an HTTPRoute resource.
     This is used for RHOAI v3.0+ clusters that use Gateway API.
+
+    HTTPRoutes are labeled with ray.io/cluster-name and ray.io/cluster-namespace.
+    We search for the HTTPRoute directly by these labels, which tells us which
+    namespace it's in (the platform namespace).
 
     Args:
         cluster_name: Name of the Ray cluster
@@ -1167,20 +1273,62 @@ def _get_dashboard_url_from_httproute(
         config_check()
         api_instance = client.CustomObjectsApi(get_api_client())
 
-        # Try to get HTTPRoute for this Ray cluster
+        # Search for HTTPRoute by cluster labels
+        # Strategy: Try cluster-wide search first, then namespace-specific search
+        # This works with minimal permissions since users need HTTPRoute read access
+        # to access dashboards anyway
+        label_selector = (
+            f"ray.io/cluster-name={cluster_name},ray.io/cluster-namespace={namespace}"
+        )
+        httproute = None
+        httproute_namespace = None
+
+        # Step 1: Try to list HTTPRoutes across all namespaces
+        # This works if user has cluster-wide permissions
         try:
-            httproute = api_instance.get_namespaced_custom_object(
+            httproutes = api_instance.list_cluster_custom_object(
                 group="gateway.networking.k8s.io",
                 version="v1",
-                namespace=namespace,
                 plural="httproutes",
-                name=cluster_name,
+                label_selector=label_selector,
             )
-        except client.exceptions.ApiException as e:
-            if e.status == 404:
-                # HTTPRoute not found - this is expected for SDK v0.31.1 and below or Kind clusters
-                return None
-            raise
+            items = httproutes.get("items", [])
+            if items:
+                httproute = items[0]
+                httproute_namespace = httproute["metadata"]["namespace"]
+        except Exception:
+            # No cluster-wide permissions, continue to namespace-specific search
+            pass
+
+        # Step 2: If not found, search common namespaces
+        # This works with namespace-scoped permissions
+        if not httproute:
+            search_namespaces = [
+                "redhat-ods-applications",
+                "opendatahub",
+                "default",
+                "ray-system",
+            ]
+
+            for ns in search_namespaces:
+                try:
+                    httproutes = api_instance.list_namespaced_custom_object(
+                        group="gateway.networking.k8s.io",
+                        version="v1",
+                        namespace=ns,
+                        plural="httproutes",
+                        label_selector=label_selector,
+                    )
+                    items = httproutes.get("items", [])
+                    if items:
+                        httproute = items[0]
+                        httproute_namespace = ns
+                        break
+                except client.exceptions.ApiException:
+                    continue
+
+        if not httproute:
+            return None
 
         # Get the Gateway reference from HTTPRoute
         parent_refs = httproute.get("spec", {}).get("parentRefs", [])
@@ -1213,13 +1361,12 @@ def _get_dashboard_url_from_httproute(
             return None
 
         # Construct the dashboard URL using RHOAI v3.0+ Gateway API pattern
-        # The HTTPRoute existence confirms v3.0+, so we use the standard path pattern
         # Format: https://{hostname}/ray/{namespace}/{cluster-name}
         protocol = "https"  # Gateway API uses HTTPS
         dashboard_url = f"{protocol}://{hostname}/ray/{namespace}/{cluster_name}"
 
         return dashboard_url
 
-    except Exception as e:  # pragma: no cover
+    except Exception:  # pragma: no cover
         # If any error occurs, return None to fall back to OpenShift Route
         return None
