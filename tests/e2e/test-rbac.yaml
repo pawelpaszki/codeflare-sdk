@@ -1,0 +1,112 @@
+---
+# ClusterRole for e2e test user
+# This grants permissions needed to run the OAuth e2e tests
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: codeflare-e2e-test-role
+rules:
+  # Namespace management
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  
+  # Kueue resources (cluster-scoped)
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["clusterqueues", "resourceflavors"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch", "update"]
+  
+  # Kueue resources (namespace-scoped)
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["localqueues"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch", "update"]
+  
+  # Ray clusters
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch", "update"]
+  
+  # Routes (OpenShift)
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  
+  # HTTPRoutes (Gateway API)
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "gateways"]
+    verbs: ["get", "list", "watch"]
+  
+  # Pods, Services, Events (for diagnostics)
+  - apiGroups: [""]
+    resources: ["pods", "services", "events"]
+    verbs: ["get", "list", "watch"]
+  
+  # Pods/log (for debugging)
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  
+  # Nodes (for resource checking)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  
+  # ConfigMaps and Secrets (may be needed by Ray clusters)
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  
+  # ServiceAccounts
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  
+  # RoleBindings in test namespaces
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "delete", "get", "list", "watch", "bind", "escalate"]
+
+---
+# ClusterRoleBinding for the test user
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: codeflare-e2e-test-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: codeflare-e2e-test-role
+subjects:
+  - kind: User
+    name: ldap-admin1  # Replace with your test user name
+    apiGroup: rbac.authorization.k8s.io
+
+---
+# Additional: Allow user to create resources in their namespaces
+# This gives full access to resources within namespaces the user creates
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: codeflare-e2e-namespace-admin
+rules:
+  # Full access to all resources in test namespaces
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+
+---
+# RoleBinding template - will need to be created for each test namespace
+# OR use the approach below with ClusterRoleBinding for test namespace pattern
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: codeflare-e2e-namespace-admin-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: codeflare-e2e-namespace-admin
+subjects:
+  - kind: User
+    name: ldap-admin1  # Replace with your test user name
+    apiGroup: rbac.authorization.k8s.io
+
