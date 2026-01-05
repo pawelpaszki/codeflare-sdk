@@ -23,12 +23,16 @@ class TestRayClusterSDKOauth:
         initialize_kubernetes_client(self)
 
     def teardown_method(self):
+        # Clean up HTTPRoutes for this cluster (they're created in platform namespaces)
+        cleanup_httproutes_for_cluster(self, "mnist", self.namespace)
         delete_namespace(self)
         delete_kueue_resources(self)
 
     def test_mnist_ray_cluster_sdk_auth(self):
         self.setup_method()
         create_namespace(self)
+        # Clean up any stale HTTPRoutes from previous test runs with the same cluster name
+        cleanup_httproutes_for_cluster(self, "mnist")
         create_kueue_resources(self)
         self.run_mnist_raycluster_sdk_oauth()
 

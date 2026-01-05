@@ -295,6 +295,56 @@ def delete_namespace(self):
         self.api_instance.delete_namespace(self.namespace)
 
 
+def cleanup_httproutes_for_cluster(self, cluster_name, namespace=None):
+    """
+    Clean up HTTPRoutes created for a Ray cluster.
+    HTTPRoutes are created in platform namespaces (e.g., redhat-ods-applications)
+    and are not automatically deleted when the cluster namespace is deleted.
+
+    Args:
+        cluster_name: Name of the Ray cluster
+        namespace: Optional namespace to filter by. If None, cleans up all HTTPRoutes
+                   for the given cluster_name regardless of namespace.
+    """
+    if namespace:
+        label_selector = f"ray.io/cluster-name={cluster_name},ray.io/cluster-namespace={namespace}"
+    else:
+        # Clean up all HTTPRoutes for this cluster name (useful for cleaning stale routes)
+        label_selector = f"ray.io/cluster-name={cluster_name}"
+
+    # Search in platform namespaces where HTTPRoutes are typically created
+    search_namespaces = [
+        "redhat-ods-applications",
+        "opendatahub",
+    ]
+
+    for ns in search_namespaces:
+        try:
+            httproutes = self.custom_api.list_namespaced_custom_object(
+                group="gateway.networking.k8s.io",
+                version="v1",
+                namespace=ns,
+                plural="httproutes",
+                label_selector=label_selector,
+            )
+            for hr in httproutes.get("items", []):
+                hr_name = hr["metadata"]["name"]
+                try:
+                    self.custom_api.delete_namespaced_custom_object(
+                        group="gateway.networking.k8s.io",
+                        version="v1",
+                        namespace=ns,
+                        plural="httproutes",
+                        name=hr_name,
+                    )
+                    print(f"Deleted HTTPRoute '{hr_name}' from namespace '{ns}'")
+                except Exception as e:
+                    print(f"Warning: Failed to delete HTTPRoute '{hr_name}': {e}")
+        except Exception:
+            # Namespace doesn't exist or no permissions
+            pass
+
+
 def initialize_kubernetes_client(self):
     config.load_kube_config()
     # Initialize Kubernetes client
